@@ -11,6 +11,8 @@ WorkingDirectory=__WORKDIR__
 ExecStart=__NODE__ dist/index.js
 Restart=always
 RestartSec=10
+CPUWeight=1000
+Nice=-10
 # yt-dlp installed with `pip install --user` lives here.
 Environment=PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=NODE_ENV=production
