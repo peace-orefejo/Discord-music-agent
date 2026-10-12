@@ -33,6 +33,8 @@ export const TRANSCODE_BITRATE = 128_000;
 export const MAX_VOLUME = 200;
 export const VOLUME_STEP = 10;
 export const MAX_MISSED_FRAMES = 250;
+export const STALE_CONNECTION_GRACE_MS = 5_000;
+export const STUCK_CONNECTION_TIMEOUT_MS = 20_000;
 
 interface PreloadedStream {
   url: string;
@@ -57,6 +59,7 @@ export class MusicAgent {
   private volumePercent = DEFAULT_VOLUME;
   private preload: PreloadedStream | null = null;
   private lastChannel: VoiceBasedChannel | null = null;
+  private recoveryTimer: NodeJS.Timeout | null = null;
   private readonly guildId: string;
   private readonly youtube = youtubeService;
   private readonly gemini = new GeminiAgent();
@@ -106,7 +109,16 @@ export class MusicAgent {
 
   async join(channel: VoiceBasedChannel): Promise<VoiceConnection> {
     if (this.connection && this.connection.state.status !== VoiceConnectionStatus.Destroyed) {
-      return this.connection;
+      try {
+        await entersState(this.connection, VoiceConnectionStatus.Ready, STALE_CONNECTION_GRACE_MS);
+        return this.connection;
+      } catch {
+        log.warn(
+          { guildId: this.guildId, status: this.connection.state.status },
+          'Existing voice connection never recovered, rebuilding it',
+        );
+        this.connection.destroy();
+      }
     }
     this.connection = null;
 
@@ -160,12 +172,19 @@ export class MusicAgent {
       });
     });
 
-    this.connection.on('stateChange', (oldState, newState) => {
+    const connection = this.connection;
+    connection.on('stateChange', (oldState, newState) => {
       if (oldState.status === newState.status) return;
       log.info(
         { guildId: this.guildId, from: oldState.status, to: newState.status },
         'Voice connection state changed',
       );
+      if (
+        newState.status === VoiceConnectionStatus.Signalling ||
+        newState.status === VoiceConnectionStatus.Connecting
+      ) {
+        this.watchForStuckConnection(connection);
+      }
     });
 
     const subscription = this.connection.subscribe(this.player);
@@ -403,6 +422,24 @@ export class MusicAgent {
     this.preload = null;
   }
 
+  private watchForStuckConnection(connection: VoiceConnection): void {
+    if (this.recoveryTimer) return;
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      if (this.connection !== connection) return;
+      const status = connection.state.status;
+      if (
+        status === VoiceConnectionStatus.Ready ||
+        status === VoiceConnectionStatus.Destroyed ||
+        status === VoiceConnectionStatus.Disconnected
+      ) {
+        return;
+      }
+      log.warn({ guildId: this.guildId, status }, 'Voice connection stuck, rejoining');
+      void this.rejoin();
+    }, STUCK_CONNECTION_TIMEOUT_MS);
+  }
+
   /** Rebuilds a dropped connection to the same channel, keeping the queue. */
   private async rejoin(): Promise<boolean> {
     const channel = this.lastChannel;
@@ -478,6 +515,8 @@ export class MusicAgent {
   }
 
   destroy(): void {
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null;
     this.stop();
     void this.panel.clear();
     this.connection?.destroy();
