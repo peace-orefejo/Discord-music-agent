@@ -21,6 +21,7 @@ import { childLogger, createCorrelationId } from '../utils/logger';
 import { errorEmbed, type TrackInfo } from '../utils/embeds';
 import { errorText, explainError, explainErrorOr } from '../utils/errors';
 import { NowPlayingPanel } from './NowPlayingPanel';
+import { paceAudioPlayer, startEventLoopStallMonitor } from '../utils/voicePacing';
 
 const log = childLogger({ module: 'MusicAgent' });
 
@@ -31,6 +32,7 @@ export const DEFAULT_VOLUME = 100;
 export const TRANSCODE_BITRATE = 128_000;
 export const MAX_VOLUME = 200;
 export const VOLUME_STEP = 10;
+export const MAX_MISSED_FRAMES = 250;
 
 interface PreloadedStream {
   url: string;
@@ -61,7 +63,10 @@ export class MusicAgent {
 
   constructor(guildId: string) {
     this.guildId = guildId;
-    this.player = createAudioPlayer();
+    this.player = paceAudioPlayer(
+      createAudioPlayer({ behaviors: { maxMissedFrames: MAX_MISSED_FRAMES } }),
+    );
+    startEventLoopStallMonitor();
     this.setupPlayerEvents();
   }
 
